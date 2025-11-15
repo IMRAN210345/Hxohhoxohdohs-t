@@ -11,6 +11,7 @@ import re
 # --- কনফিগারেশন: Railway Environment Variables থেকে লোড হবে ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  
 try:
+    # এখানে আপনার CHANNEL_ID নেগেটিভ ভ্যালু হিসেবে নিশ্চিত করুন
     ADMIN_USER_ID = int(os.environ.get("ADMIN_USER_ID")) 
     CHANNEL_ID = int(os.environ.get("CHANNEL_ID"))
 except (TypeError, ValueError):
@@ -159,10 +160,11 @@ async def handle_admin_video_upload(update: Update, context: ContextTypes.DEFAUL
         shareable_link = f"https://t.me/{BOT_USERNAME}?start={encoded_payload}"  
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔥 ভিডিও দেখুন 🥵", url=shareable_link)]])  
 
+        # *** ক্যাপশন টেক্সট সরলীকরণ করা হলো (এখানেই Syntax Error ছিল) ***
         channel_caption = f"""\
-╭═══════════════════
-╠ ‣ 🔥 নতুন {required_count} টি ভিডিও ‣
-╰═══════════════════
+---
+🔥 নতুন {required_count} টি ভিডিও 🔥
+---
 """
 
         # চ্যানেলে থাম্বনেইল সহ পোস্ট করা
@@ -204,13 +206,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     try:
         decoded_payload = base64.urlsafe_b64decode(padded_payload.encode('utf-8')).decode('utf-8')
-        if not decoded_payload.startswith("VID_"):
+        if not decoded_payload.startswith("VID_") and not decoded_payload.startswith("UNLOCK_"):
             raise ValueError
     except Exception:
         await update.message.reply_text("দুঃখিত, লিংকে কোনো সমস্যা আছে।")
         return
-        
-    permanent_id = decoded_payload.split("VID_")[1]
+    
+    # payload থেকে পার্মানেন্ট ID বের করা
+    if decoded_payload.startswith("VID_"):
+        permanent_id = decoded_payload.split("VID_")[1]
+        is_unlocked = False # VID_ মানেই লকড অবস্থায় আছে
+    elif decoded_payload.startswith("UNLOCK_"):
+        permanent_id = decoded_payload.split("UNLOCK_")[1]
+        is_unlocked = True # UNLOCK_ মানে অ্যাড দেখে ফিরে এসেছে
+
+
     data = load_data()
     video_data = data["videos"].get(permanent_id)
 
@@ -220,61 +230,57 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     video_ids = video_data['video_ids']
     
-    # 2. ইউজার লকিং স্ট্যাটাস চেক (এখানে সহজীকৃত লজিক ব্যবহার করা হচ্ছে)
-    # যেহেতু পার্মানেন্ট ডাটাবেস নেই, আমরা ধরে নিচ্ছি যে /start কমান্ডটি অ্যাড দেখে আসার পরই দেওয়া হয়।
-    # যদি এডমিন না হয়, তাহলে অ্যাড দেখার বাটন দেখাবে।
-    
-    # 3. ভিডিও লক অবস্থায় পাঠানো (ছবি সহ বাটন)
-    if user_id != ADMIN_USER_ID:
-        # লকড মেসেজ এবং অ্যাড দেখার বাটন
+    # 2. ভিডিও লক অবস্থায় পাঠানো (ছবি সহ বাটন)
+    if not is_unlocked and user_id != ADMIN_USER_ID:
         
-        # Base64 দিয়ে আবার এনকোড করা হচ্ছে, যাতে অ্যাড দেখে ফিরে আসলে এটি আনলক করতে পারে
+        # Base64 দিয়ে UNLOCK_ কী তৈরি করা
         lock_key = base64.urlsafe_b64encode(f"UNLOCK_{permanent_id}".encode('utf-8')).decode('utf-8').rstrip('=')
         
         # ইউজারকে অ্যাড দেখতে পাঠানোর বাটন
-        keyboard = InlineKeyboardMarkup([[
+        ad_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🌐 অ্যাড দেখুন এবং ভিডিও আনলক করুন", url=f"{AD_URL}")
         ]])
         
-        # লকড মেসেজ: সবগুলো ভিডিওর ক্যাপশন হিসেবে যাবে
-        locked_caption = f"🚨 ভিডিও লকড! 🚨\n\nভিডিওগুলো আনলক করতে নিচের বাটনে ক্লিক করে অ্যাডটি দেখুন।\n\nভিডিও সংখ্যা: {len(video_ids)}"
-        
-        # প্রথম ভিডিও ফাইল আইডি দিয়ে লকড মেসেজ হিসেবে photo/video পাঠানো
-        # যেহেতু ভিডিও প্রিভিউ চাই, আমরা প্রথম ভিডিওটিই (বা থাম্বনেইল) পাঠাতে পারি।
-        try:
-            # আনলক করার জন্য একটি বাটন সহ মেসেজ পাঠাচ্ছে
-            sent_message = await update.message.reply_photo(
-                photo=video_data['photo_id'], 
-                caption=locked_caption, 
-                reply_markup=keyboard
-            )
-            # এটি একটি অস্থায়ী মেসেজ, যা পরে ডিলিট হতে পারে (যদি ইউজার দেখতে না পায়)
-            context.job_queue.run_once(delete_scheduled_message, when=DELETION_TIME_SECONDS,
-                                    data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
-        except Exception as e:
-            logger.error(f"লকড মেসেজ পাঠাতে ব্যর্থ: {e}")
-            await update.message.reply_text("ভিডিও লকড। আনলক করতে নিচের লিংকে যান।", reply_markup=keyboard)
-        
-        # একটি নতুন বাটন যা ইউজারকে অ্যাড দেখে আসার পর আনলক করতে সাহায্য করবে (start payload সহ)
+        # আনলক করার জন্য একটি বাটন
         unlock_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("✅ আনলক করুন এবং ভিডিও দেখুন", url=f"https://t.me/{BOT_USERNAME}?start={lock_key}")
         ]])
+
+        locked_caption = f"🚨 ভিডিও লকড! 🚨\n\nভিডিওগুলো আনলক করতে নিচের বাটনে ক্লিক করে অ্যাডটি দেখুন।\n\nভিডিও সংখ্যা: {len(video_ids)}"
+        
+        try:
+            # থাম্বনেইল সহ লকড মেসেজ পাঠানো
+            sent_message = await update.message.reply_photo(
+                photo=video_data['photo_id'], 
+                caption=locked_caption, 
+                reply_markup=ad_keyboard
+            )
+            context.job_queue.run_once(delete_scheduled_message, when=DELETION_TIME_SECONDS,
+                                    data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
+        except Exception as e:
+            logger.error(f"লকড মেসেজ/ছবি পাঠাতে ব্যর্থ: {e}")
+            await update.message.reply_text("ভিডিও লকড। আনলক করতে নিচের লিংকে যান।", reply_markup=ad_keyboard)
+        
         await update.message.reply_text("ওয়েবসাইট থেকে অ্যাড দেখে আসার পর নিচের বাটনটি ক্লিক করুন:", reply_markup=unlock_keyboard)
 
         logger.info(f"লকড ভিডিও পাঠানো হলো: ID {permanent_id} to User {user_id}")
         return
 
-    # 4. ভিডিও আনলকড/এডমিন হলে
-    # যদি এডমিন হয় বা অ্যাড দেখে ফিরে আসে (এই সহজ লজিক অনুযায়ী)
+    # 3. ভিডিও আনলকড/এডমিন হলে
     
     # ভিডিওগুলো MediaGroup হিসেবে পাঠানো হচ্ছে
     media_group = []
     for i, file_id in enumerate(video_ids):
         # প্রথম ভিডিওতে ক্যাপশন দেওয়া হচ্ছে
-        caption = f"🎬 ভিডিও {i+1} / {len(video_ids)}\n\n(এডমিন/আনলকড কপি)" if i == 0 else ""
+        caption = f"🎬 ভিডিও {i+1} / {len(video_ids)}" if i == 0 else ""
         media_group.append(InputMediaVideo(media=file_id, caption=caption))
         
     try:
+        # সফলভাবে আনলক হওয়ার মেসেজ
+        if is_unlocked and user_id != ADMIN_USER_ID:
+            await update.message.reply_text("✅ আনলক সফল! নিচে আপনার ভিডিওগুলো দেখা যাচ্ছে।", reply_markup=telegram.ReplyKeyboardRemove())
+
+
         sent_messages = await context.bot.send_media_group(chat_id=chat_id, media=media_group)
         logger.info(f"আনলকড ভিডিও পাঠানো সফল: ID {permanent_id} to User {user_id}")
 
@@ -317,87 +323,6 @@ def main() -> None:
     ))  
 
     print(f"🔥 বট চালু হয়েছে — এডমিন এখন /start_upload_N কমান্ড দিয়ে {AD_URL} এ অ্যাড দেখে মাল্টিপল ভিডিও আপলোড করতে পারবেন।")  
-    application.run_polling(poll_interval=3.0)
-
-if __name__ == "__main__":
-    main()╠ ‣ দেশি ভিডিও ‣
-╰═══════════════════
-"""
-
-    try:  
-        await context.bot.send_photo(chat_id=CHANNEL_ID, photo=photo_file_id, caption=channel_caption, reply_markup=keyboard)  
-        logger.info(f"চ্যানেলে পোস্ট সফল: Channel ID {CHANNEL_ID}, Permanent ID {permanent_id}")  
-    except Exception as e:  
-        logger.error(f"চ্যানেলে পোস্ট করতে ব্যর্থ: {e}")  
-        await update.message.reply_text(f"❌ চ্যানেলে পোস্ট ব্যর্থ হয়েছে। ত্রুটি: {e}")  
-        return  
-
-    try:  
-        await update.message.delete()  
-        await context.bot.delete_message(chat_id=user_id, message_id=staged_data['photo_msg_id'])  
-    except Exception as e:  
-        logger.warning(f"এডমিন মেসেজ ডিলিট করতে ব্যর্থ: {e}")  
-
-    await update.message.reply_text(f"✅ সফলভাবে পোস্ট হয়েছে। স্থায়ী আইডি: {permanent_id}")
-
-# --- ইউজার /start কমান্ড ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not update.message:
-        return
-
-    if not context.args:
-        await update.message.reply_text("স্বাগতম! ভিডিও দেখার জন্য চ্যানেলের '🔥 ভিডিও দেখুন 🥵' বাটনে ক্লিক করুন।")
-        return
-        
-    try:
-        encoded_payload = context.args[0]
-        # Base64 ডিকোডিং এর জন্য প্যাডিং নিশ্চিত করা
-        padded_payload = encoded_payload + '=' * (4 - len(encoded_payload) % 4)
-        decoded_payload = base64.urlsafe_b64decode(padded_payload.encode('utf-8')).decode('utf-8')
-
-        if decoded_payload.startswith("VID_"):
-            permanent_id = decoded_payload.split("VID_")[1]
-            data = load_data()
-            video_data = data["videos"].get(permanent_id)
-
-            if video_data and video_data.get("video_id"):
-                video_file_id = video_data["video_id"]
-                sent_message = await update.message.reply_video(video=video_file_id, caption="🔥Successfull🥵")
-
-                if update.message.from_user.id != ADMIN_USER_ID:
-                    # ৪ ঘন্টা পর ডিলিট করার জন্য শিডিউল করা
-                    context.job_queue.run_once(delete_scheduled_message, when=DELETION_TIME_SECONDS,
-                                            data={'chat_id': sent_message.chat_id, 'message_id': sent_message.message_id})
-                    logger.info(f"ভিডিও ডিলিট শিডিউল করা হলো: ID {permanent_id}")
-                else:
-                    logger.info(f"এডমিন হওয়ায় ডিলিট শিডিউল করা হলো না: ID {permanent_id}")
-                return
-            
-            await update.message.reply_text("দুঃখিত, এই ভিডিওটির ফাইল খুঁজে পাওয়া যায়নি।")
-            
-    except Exception as e:
-        logger.error(f"স্টার্ট কমান্ড প্রসেস করতে ব্যর্থ: {e}")
-        await update.message.reply_text("দুঃখিত, লিংকে কোনো সমস্যা আছে।")
-
-
-# --- মেইন ফাংশন ---
-def main() -> None:
-    # কনফিগারেশন ত্রুটি হ্যান্ডলিং
-    if not BOT_TOKEN or ADMIN_USER_ID == 0 or CHANNEL_ID == 0:
-        logger.error("🛑 গুরুতর কনফিগারেশন ত্রুটি: BOT_TOKEN, ADMIN_USER_ID, বা CHANNEL_ID Environment Variables এ সেট করা নেই বা অবৈধ মান রয়েছে।")
-        print("🛑 গুরুতর কনফিগারেশন ত্রুটি: Railway Variables চেক করুন।")
-        return
-
-    logging.getLogger('httpx').setLevel(logging.WARNING)
-    application = Application.builder().token(BOT_TOKEN).build()
-
-    # হ্যান্ডলার যুক্ত করা
-    application.add_handler(CommandHandler("start", start_command))  
-    application.add_handler(CommandHandler("start_upload", start_upload_command))  
-    application.add_handler(MessageHandler(filters.PHOTO & filters.User(ADMIN_USER_ID) & (~filters.COMMAND), handle_admin_photo_upload))  
-    application.add_handler(MessageHandler(filters.VIDEO & filters.User(ADMIN_USER_ID) & (~filters.COMMAND), handle_admin_video_upload))  
-
-    print("🔥 বট চালু হয়েছে — এডমিন এখন /start_upload কমান্ড দিয়ে থাম্বনেইল ও ভিডিও আপলোড করতে পারবেন।")  
     application.run_polling(poll_interval=3.0)
 
 if __name__ == "__main__":
